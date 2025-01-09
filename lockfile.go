@@ -9,10 +9,12 @@ package lockfile
 import (
 	"errors"
 	"fmt"
+	"github.com/shirou/gopsutil/v4/process"
 	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Lockfile is a pid file which can be locked
@@ -25,6 +27,7 @@ func (t TemporaryError) Error() string { return string(t) }
 
 // Temporary returns always true.
 // It exists, so you can detect it via
+//
 //	if te, ok := err.(interface{ Temporary() bool }); ok {
 //		fmt.Println("I am a temporary error situation, so wait and retry")
 //	}
@@ -86,7 +89,7 @@ func (l Lockfile) GetOwner() (*os.Process, error) {
 // It Returns nil, if successful and and error describing the reason, it didn't work out.
 // Please note, that existing lockfiles containing pids of dead processes
 // and lockfiles containing no pid at all are simply deleted.
-func (l Lockfile) TryLock() error {
+func (l Lockfile) TryLock(expProcName string) error {
 	name := string(l)
 
 	// This has been checked by New already. If we trigger here,
@@ -137,12 +140,21 @@ func (l Lockfile) TryLock() error {
 	}
 
 	proc, err := l.GetOwner()
+
 	switch err {
 	default:
 		// Other errors -> defensively fail and let caller handle this
 		return err
 	case nil:
-		if proc.Pid != os.Getpid() {
+		newProc, err := process.NewProcess(int32(proc.Pid))
+		if err != nil {
+			return err
+		}
+		newProcName, err := newProc.Name()
+		if err != nil {
+			return err
+		}
+		if proc.Pid != os.Getpid() && strings.Contains(strings.ToLower(newProcName), strings.ToLower(expProcName)) {
 			return ErrBusy
 		}
 	case ErrDeadOwner, ErrInvalidPid: // cases we can fix below
@@ -158,7 +170,7 @@ func (l Lockfile) TryLock() error {
 	}
 
 	// now that the stale lockfile is gone, let's recurse
-	return l.TryLock()
+	return l.TryLock(expProcName)
 }
 
 // Unlock a lock again, if we owned it. Returns any error that happened during release of lock.

@@ -2,6 +2,8 @@ package lockfile
 
 import (
 	"fmt"
+	"github.com/shirou/gopsutil/v4/process"
+	"github.com/stretchr/testify/assert"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -18,7 +20,7 @@ func ExampleLockfile() {
 	}
 
 	// Error handling is essential, as we only try to get the lock.
-	if err = lock.TryLock(); err != nil {
+	if err = lock.TryLock("main"); err != nil {
 		fmt.Printf("Cannot lock %q, reason: %v", lock, err)
 		panic(err) // handle properly please!
 	}
@@ -47,7 +49,7 @@ func TestBasicLockUnlock(t *testing.T) {
 		return
 	}
 
-	err = lf.TryLock()
+	err = lf.TryLock("main")
 	if err != nil {
 		t.Fail()
 		fmt.Println("Error locking lockfile: ", err)
@@ -111,7 +113,7 @@ func TestBusy(t *testing.T) {
 		return
 	}
 
-	got := lf.TryLock()
+	got := lf.TryLock("main")
 	if got != ErrBusy {
 		t.Fatalf("expected error %q, got %v", ErrBusy, got)
 		return
@@ -129,7 +131,7 @@ func TestRogueDeletion(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	err = lf.TryLock()
+	err = lf.TryLock("main")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -158,7 +160,7 @@ func TestRogueDeletionDeadPid(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	err = lf.TryLock()
+	err = lf.TryLock("main")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -203,7 +205,7 @@ func TestRemovesStaleLockOnDeadOwner(t *testing.T) {
 		t.Fatal(err)
 		return
 	}
-	err = lf.TryLock()
+	err = lf.TryLock("main")
 	if err != nil {
 		t.Fatal(err)
 		return
@@ -235,7 +237,7 @@ func TestInvalidPidLeadToReplacedLockfileAndSuccess(t *testing.T) {
 		return
 	}
 
-	if err := lf.TryLock(); err != nil {
+	if err := lf.TryLock("main"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 		return
 	}
@@ -294,4 +296,88 @@ func TestScanPidLine(t *testing.T) {
 			t.Errorf("%d: expected error %v, got %v", step, want, got)
 		}
 	}
+}
+
+// custom
+
+func TestTryLock_Success(t *testing.T) {
+	lock, err := New("/tmp/test.lock")
+	assert.NoError(t, err)
+
+	err = lock.TryLock("testprocess")
+	assert.NoError(t, err)
+}
+
+func TestTryLock_LockedByOtherProcess(t *testing.T) {
+	// Simulate an external process holding the lock
+	lock, err := New("/tmp/test.lock")
+	assert.NoError(t, err)
+
+	// Simulate a process holding the lock
+	existingProc := &process.Process{
+		Pid: 1234, // Example PID of an external process
+	}
+	// Set up the lock file to mimic another process holding the lock
+	lockContent := fmt.Sprintf("%d\n", existingProc.Pid)
+	err = os.WriteFile("/tmp/test.lock", []byte(lockContent), 0644)
+	assert.NoError(t, err)
+
+	err = lock.TryLock("testprocess")
+	assert.EqualError(t, err, ErrBusy.Error())
+}
+
+func TestTryLock_DeadProcess(t *testing.T) {
+	// Simulate a dead process
+	lock, err := New("/tmp/test.lock")
+	assert.NoError(t, err)
+
+	// Write a dead process' PID to the lock file
+	deadProcPid := 9999
+	err = os.WriteFile("/tmp/test.lock", []byte(fmt.Sprintf("%d\n", deadProcPid)), 0644)
+	assert.NoError(t, err)
+
+	// Simulate the process being dead
+	err = lock.TryLock("testprocess")
+	assert.NoError(t, err)
+}
+
+func TestUnlock_Success(t *testing.T) {
+	lock, err := New("/tmp/test.lock")
+	assert.NoError(t, err)
+
+	err = lock.TryLock("testprocess")
+	assert.NoError(t, err)
+
+	err = lock.Unlock()
+	assert.NoError(t, err)
+
+	// Verify that the lock file was deleted
+	_, err = os.Stat("/tmp/test.lock")
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestUnlock_RogueDeletion(t *testing.T) {
+	lock, err := New("/tmp/test.lock")
+	assert.NoError(t, err)
+
+	// Try unlocking without having the lock (simulate rogue deletion)
+	err = lock.Unlock()
+	assert.EqualError(t, err, ErrRogueDeletion.Error())
+}
+
+func TestTryLock_DifferentProcessName(t *testing.T) {
+	// Simulate an attempt to lock with a different process name
+	lock, err := New("/tmp/test.lock")
+	assert.NoError(t, err)
+
+	// Simulate an existing process holding the lock with a different process name
+	existingProc := &process.Process{
+		Pid: 1234,
+	}
+	lockContent := fmt.Sprintf("%d\n", existingProc.Pid)
+	err = os.WriteFile("/tmp/test.lock", []byte(lockContent), 0644)
+	assert.NoError(t, err)
+
+	err = lock.TryLock("anotherprocess")
+	assert.NoError(t, err) // Since the process name doesn't match, we should be able to acquire the lock.
 }
